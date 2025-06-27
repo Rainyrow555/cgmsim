@@ -1,192 +1,87 @@
 const fetch = require('node-fetch');
-const dotenv = require('dotenv');
-var result = require('dotenv').config();
-const { floor } = require('mathjs');
-const profile = require('./files/profile.json');
-const randomMeals = require('./files/randomMeals.json');
+const dotenv = require('dotenv').config();
+const fs = require('fs');
+const moment = require('moment');
+
+// Data imports
 const sgv = require('./files/sgv.json');
+const profile = require('./files/profile.json');
+const iobHistory = require('./files/iobHistory.json');  // ← add this JSON to track boluses
+const activity = require('./files/exercise.json');      // ← stores recent workouts
 
 const api_url = process.env.API_URL_TEST;
 const api_key = process.env.API_KEY;
 
-const fs = require('fs');
-var moment = require('moment'); 
+const NOW = Date.now();
+const BG = sgv[0].sgv / 18;
+const TREND = sgv[0].direction || 'Flat';
 
-const list1 = profile.filter(e => e._id).map(e => ({_id: e._id, defaultProfile: e.defaultProfile, store: e.store, startDate: e.startDate, mills: e.mills, units: e.units, created_at: e.created_at}));
-//console.log(list1);
+// 1. Get latest AutoSync profile
+const recentProfiles = profile.filter(p => p.mills >= (NOW - 86400000));
+const autoSyncProfile = recentProfiles.map(p => p.store?.['OpenAPS Autosync'])[0];
+if (!autoSyncProfile) {
+  console.error('🚫 No AutoSync profile found.');
+  process.exit(1);
+}
 
-let lastlist1 = list1.filter(function (e) {
-    return e.mills >= (Date.now()-86400000);
-});
-//console.log('this is the latest profiles in the 24 h:',lastlist1);
+// 2. Get ISF, CR, and Target from profile
+let sens = autoSyncProfile.sens[0].value;
+let cr = autoSyncProfile.carbratio[0].value;
+const target = autoSyncProfile.target_high[0].value;
 
-console.log('----------------------------------------');
+// 3. Exercise sensitivity boost (within 2h of exercise or during it)
+const recentWorkout = activity.find(e => NOW - e.time < 2 * 60 * 60 * 1000);
+if (recentWorkout) {
+  console.log('🏃‍♀️ Exercise detected. Boosting sensitivity.');
+  sens = sens * 1.3; // Increase sensitivity = lower correction dose
+}
 
-const profileDefault = lastlist1.map(entry => entry.store).map(entry => ({ Default: entry.Default }));
-//console.log('latest Default profile:', profileDefault);
-const sensProfileDefArr = profileDefault.map(entry => entry.Default).map(entry => ({ sens: entry.sens}));
-//console.log('this is the array of sens in Default profile:', sensProfileDefArr);
-const defaultSens_z = sensProfileDefArr.map(entry => entry.sens);
-const defaultSens = defaultSens_z[0];
-console.log('this is the latest sensitivity in Default profile details:', defaultSens);
+// 4. IOB check — cap insulin in past hour to 1.5U
+const iobWindow = iobHistory.filter(e => (NOW - e.time < 60 * 60 * 1000));
+const iobTotal = iobWindow.reduce((sum, b) => sum + b.insulin, 0);
+const iobCap = 1.5;
+if (iobTotal >= iobCap) {
+  console.log(`🛑 IOB cap hit: ${iobTotal.toFixed(2)}U in last hour. No microbolus given.`);
+  return;
+}
 
+// 5. Microbolus logic
+const delta = BG - target;
+if (delta > 0.5 && !TREND.includes('Down')) {
+  let microDose = Math.min(0.3, Math.max(0.05, delta / sens));
+  
+  // Adjust for remaining IOB cap
+  const remainingCap = iobCap - iobTotal;
+  if (microDose > remainingCap) microDose = remainingCap;
 
-const targetLowProfileDefArr = profileDefault.map(entry => entry.Default).map(entry => ({ target_low: entry.target_low}));
-//console.log('this is the array of target_low in Default profile:', sensProfileDefArr);
-const targetHighProfileDefArr = profileDefault.map(entry => entry.Default).map(entry => ({ target_high: entry.target_high}));
-//console.log('this is the array of target_high in Default profile:', sensProfileDefArr);
-const defaultTargetLow_z = targetLowProfileDefArr.map(entry => entry.target_low);
-const defaultTargetLow = defaultTargetLow_z[0];
-console.log('this is the latest low target in Default profile details:', defaultTargetLow);
-const defaultTargetHigh_z = targetHighProfileDefArr.map(entry => entry.target_high);
-const defaultTargetHigh = defaultTargetHigh_z[0];
-console.log('this is the latest high target in Default profile details:', defaultTargetHigh);
+  const roundedDose = Math.round(microDose * 100) / 100;
 
-const crProfileDefArr = profileDefault.map(entry => entry.Default).map(entry => ({ carbratio: entry.carbratio}));
-//console.log('this is the array of carb ratios in Default profile:', crProfileDefArr);
-const defaultCR_z = crProfileDefArr.map(entry => entry.carbratio);
-const defaultCR = defaultCR_z[0];
-console.log('this is the latest carb ratio in Default profile details:', defaultCR);
-
-console.log('----------------------------------------');
-
-
-const profileAutoSync = lastlist1.map(entry => entry.store).map(entry => ({ OpenAPS_Autosync: entry['OpenAPS Autosync'] }));
-//console.log('latest AutoSync profile:', profileAutoSync);
-const sensProfileAutoSyncArr = profileAutoSync.map(entry => entry.OpenAPS_Autosync).map(entry => ({ sens: entry.sens}));
-//console.log('this is the array of sens in AutoSync profile:', sensProfileAutoSyncArr);
-const autoSyncSens_z = sensProfileAutoSyncArr.map(entry => entry.sens);
-const autoSyncSens = autoSyncSens_z[0];
-console.log('this is the latest sensitivity AutoSync profile details:', autoSyncSens);
-
-
-const targetLowProfileAutoSyncArr = profileAutoSync.map(entry => entry.OpenAPS_Autosync).map(entry => ({ target_low: entry.target_low}));
-//console.log('this is the array of target_low in Autosync profile:', targetLowAutoSyncArr);
-const targetHighProfileAutoSyncArr = profileAutoSync.map(entry => entry.OpenAPS_Autosync).map(entry => ({ target_high: entry.target_high}));
-//console.log('this is the array of target_high in Autosync profile:', targetHighProfileAutoSyncArr);
-const autoSyncTargetLow_z = targetLowProfileAutoSyncArr.map(entry => entry.target_low);
-const autoSyncTargetLow = autoSyncTargetLow_z[0];
-console.log('this is the latest low target in Autosync profile details:', autoSyncTargetLow);
-const autoSyncTargetHigh_z = targetHighProfileAutoSyncArr.map(entry => entry.target_high);
-const autoSyncTargetHigh = autoSyncTargetHigh_z[0];
-console.log('this is the latest high target in Autosync profile details:', autoSyncTargetHigh);
-
-
-const crProfileAutoSyncArr = profileAutoSync.map(entry => entry.OpenAPS_Autosync).map(entry => ({ carbratio: entry.carbratio}));
-//console.log('this is the array of carb ratios in AutoSync profile:', crProfileAutoSyncArr);
-const autoSyncCR_z = crProfileAutoSyncArr.map(entry => entry.carbratio);
-const autoSyncCR = autoSyncCR_z[0];
-console.log('this is the latest carb ratio AutoSync profile details:', autoSyncCR);
-
-console.log('----------------------------------------');
-
-let correctionBR = ((sgv[0].sgv/18) - defaultTargetHigh[0].value) / autoSyncSens[0].value;
-let carbBolusBR = (randomMeals[0].carbs / defaultCR[0].value);
-let totalBolusBR = (Math.round((correctionBR + carbBolusBR)*10))/10;;
-console.log('correctionBR:',correctionBR, 'carbBolusBR:', carbBolusBR, 'totalBolusBR:',totalBolusBR);
-
-let correctionLU = ((sgv[0].sgv/18) - defaultTargetHigh[0].value) / autoSyncSens[0].value;
-let carbBolusLU = (randomMeals[1].carbs / defaultCR[0].value);
-let totalBolusLU = (Math.round((correctionLU + carbBolusLU)*10))/10;;
-console.log('correctionLU:',correctionLU, 'carbBolusLU:', carbBolusLU, 'totalBolusLU:',totalBolusLU);
-
-let correctionSN = ((sgv[0].sgv/18) - defaultTargetHigh[0].value) / autoSyncSens[0].value;
-let carbBolusSN = (randomMeals[2].carbs / defaultCR[0].value);
-let totalBolusSN = (Math.round((correctionSN + carbBolusSN)*10))/10;
-console.log('correctionSN:',correctionSN, 'carbBolusSN:', carbBolusSN, 'totalBolusSN:',totalBolusSN);
-
-let correctionDI = ((sgv[0].sgv/18) - defaultTargetHigh[0].value) / autoSyncSens[0].value;
-let carbBolusDI = (randomMeals[3].carbs / defaultCR[0].value);
-let totalBolusDI = (Math.round((correctionDI + carbBolusDI)*10))/10;
-console.log('correctionDI:',correctionDI, 'carbBolusDI:', carbBolusDI, 'totalBolusDI:',totalBolusDI);
-
-
-let bolusBR = {
-    time : Date.now(), 
-    insulin : totalBolusBR, 
-    eventType : 'Meal Bolus', 
-    created_at : moment(Date.now()).toISOString(), 
-    dateString : moment(Date.now()).toISOString(), 
+  const bolus = {
+    time: NOW,
+    insulin: roundedDose,
+    eventType: 'Auto Correction',
+    created_at: moment(NOW).toISOString(),
+    dateString: moment(NOW).toISOString(),
     secret: api_key
-};
-const bolusBRString = JSON.stringify(bolusBR, null, 4);
-console.log('this is the bolusBR:', bolusBRString);
+  };
 
-let bolusLU = {
-    time : Date.now(), 
-    insulin : totalBolusLU, 
-    eventType : 'Meal Bolus', 
-    created_at : moment(Date.now()).toISOString(), 
-    dateString : moment(Date.now()).toISOString(), 
-    secret: api_key
-};
-const bolusLUString = JSON.stringify(bolusLU, null, 4);
-console.log('this is the bolusBR:', bolusLUString);
+  fetch(api_url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bolus)
+  })
+  .then(res => {
+    if (res.ok) {
+      console.log(`✅ AutoBolus ${roundedDose}U sent. BG: ${BG.toFixed(1)} mmol/L, Sens: ${sens.toFixed(2)}.`);
+      // Save to IOB history file
+      iobHistory.push({ time: NOW, insulin: roundedDose });
+      fs.writeFileSync('./files/iobHistory.json', JSON.stringify(iobHistory.slice(-50), null, 2));
+    } else {
+      console.error(`❌ Bolus failed. Status: ${res.status}`);
+    }
+  })
+  .catch(err => console.error('⚠️ Fetch error:', err));
 
-let bolusSN = {
-    time : Date.now(), 
-    insulin : totalBolusSN, 
-    eventType : 'Meal Bolus', 
-    created_at : moment(Date.now()).toISOString(), 
-    dateString : moment(Date.now()).toISOString(), 
-    secret: api_key
-};
-const bolusSNString = JSON.stringify(bolusSN, null, 4);
-console.log('this is the bolusBR:', bolusSNString);
-
-let bolusDI = {
-    time : Date.now(), 
-    insulin : totalBolusDI, 
-    eventType : 'Meal Bolus', 
-    created_at : moment(Date.now()).toISOString(), 
-    dateString : moment(Date.now()).toISOString(),
-    secret: api_key
-};
-const bolusDIString = JSON.stringify(bolusDI, null, 4);
-console.log('this is the bolusBR:', bolusDIString);
-
-
-if (  ( (randomMeals[0].time) - Date.now() < (10 * 60 * 1000)) && ((randomMeals[0].time) - (Date.now()) > (5 * 60 * 1000))   ) {
-fetch(api_url, {
-    method: 'POST', 
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(bolusBR),
-  });
-};
-
-if (  ( (randomMeals[1].time) - Date.now() < (10 * 60 * 1000)) && ((randomMeals[1].time) - (Date.now()) > (5 * 60 * 1000))   ) {
-    fetch(api_url, {
-        method: 'POST', 
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bolusLU),
-      });
-};
-
-if (  ( (randomMeals[2].time) - Date.now() < (10 * 60 * 1000)) && ((randomMeals[2].time) - (Date.now()) > (5 * 60 * 1000))   ) {
-    fetch(api_url, {
-        method: 'POST', 
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bolusSN),
-      });
-};
-
-if (  ( (randomMeals[3].time) - Date.now() < (10 * 60 * 1000)) && ((randomMeals[3].time) - (Date.now()) > (5 * 60 * 1000))   ) {
-    fetch(api_url, {
-        method: 'POST', 
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bolusDI),
-      });
-};
-
-console.log('time to BR in min',((randomMeals[0].time) - Date.now())/60000);
-console.log('time to LU in min',((randomMeals[1].time) - Date.now())/60000);
-console.log('time to SN in min',((randomMeals[2].time) - Date.now())/60000);
-console.log('time to DI in min',((randomMeals[3].time) - Date.now())/60000);
+} else {
+  console.log(`🟡 No bolus: BG=${BG.toFixed(1)}, Δ=${delta.toFixed(2)}, Trend=${TREND}`);
+}
