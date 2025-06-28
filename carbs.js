@@ -1,90 +1,54 @@
-var food = require('./files/last_meals.json');
-var jsonfood = JSON.stringify(food);
-var karbs = JSON.parse(jsonfood);
-var carbrate = 0;
-var COB = 0;
+// files/carbs.js
 
-const dotenv = require('dotenv');
-var result = require('dotenv').config();
+/**
+ * Carb absorption model — simulates how carbs enter the bloodstream
+ * over 180 minutes using a Gaussian distribution (peaks at 60 min).
+ */
 
-const carbAbsTime = parseInt(process.env.CARBS_ABS_TIME); // meal absoption time in min defautl 360 or 6 hours
-const fast_carbAbsTime = carbAbsTime/6;  // = 1 h or 60 min
-const slow_carbAbsTime = carbAbsTime/1.5;  // = 4 h or 240 min
-const ISF = process.env.ISF; // insulin sensitivity factor in mmol/l/U, default 2
-const CR = process.env.CR; // carb ratio in g/U, default 10
+const TOTAL_ABSORPTION_MINUTES = 180;
 
-let timeSinceMealAct = karbs.map(entry => {
-    var t = entry.time;
-    var carbs_g = entry.carbs;
+function gaussian(x, mean, sigma) {
+  return Math.exp(-0.5 * Math.pow((x - mean) / sigma, 2));
+}
 
-    // the first 40g of every meal are always considered fast carbs
-    var fast = Math.min(entry.carbs,40);
+/**
+ * Returns carbs absorbed at a specific minute since the meal started.
+ * @param {number} totalCarbs - Total grams of carbs eaten
+ * @param {number} minutesSinceMeal - Minutes passed since the meal began
+ * @returns {number} - grams of carbs absorbed at that minute
+ */
+function carbAbsorption(totalCarbs, minutesSinceMeal) {
+  if (minutesSinceMeal < 0 || minutesSinceMeal > TOTAL_ABSORPTION_MINUTES) {
+    return 0;
+  }
 
-    // the amount exceeding 40 grams will be randomly split into fast and slow carbs
-    var rest = entry.carbs - fast; 
-    var FSR = (Math.random() * (0.4 - 0.1) + 0.1);  // FSR = FAST RANDOM RATIO
+  const peakTime = 60;
+  const stdDev = 30;
 
-    // all fast carbs counted together
-    var fast_carbs = fast + (FSR * rest);
+  // Normalize the curve
+  let normalization = 0;
+  for (let t = 0; t <= TOTAL_ABSORPTION_MINUTES; t++) {
+    normalization += gaussian(t, peakTime, stdDev);
+  }
 
-    // the remainder is slow carbs
-    var slow_carbs = (1-FSR) * rest;
+  const proportion = gaussian(minutesSinceMeal, peakTime, stdDev) / normalization;
+  return totalCarbs * proportion;
+}
 
-        //console.log(fast_random_ratio);
-        //console.log(fast_carbs);
-        //console.log(slow_carbs);
-        console.log('carbs_g:',carbs_g,'fast:', fast, 'rest:', rest, 'fast_carbs:', fast_carbs, 'slow_carbs:', slow_carbs);
+// ⏱️ Optional: run a test simulation
+function simulate(totalCarbs) {
+  console.log(`\n📊 Absorption curve for ${totalCarbs}g carbs\n`);
+  for (let t = 0; t <= TOTAL_ABSORPTION_MINUTES; t += 10) {
+    const absorbed = carbAbsorption(totalCarbs, t);
+    console.log(`Minute ${t}: ${absorbed.toFixed(2)}g`);
+  }
+}
 
-        if (t < (fast_carbAbsTime/2)) {
-            var AT2 = Math.pow(fast_carbAbsTime,2);
-            var fast_carbrate = (fast_carbs * 4 * t)/AT2;
-            var COB = (fast_carbs*2*Math.pow(t,2))/AT2;
-        } 
-        else if (t < (fast_carbAbsTime)) {
-            var fast_carbrate = (fast_carbs * 4 / fast_carbAbsTime)*(1 -(t/fast_carbAbsTime));
-            var AAA = (4*fast_carbs/fast_carbAbsTime);
-            var BBB = Math.pow(t,2)/(2*fast_carbAbsTime);
-            var COB = (AAA * (t-BBB)) - fast_carbs;
-        } else {
-            var fast_carbrate = 0;
-            var COB = 0;
-            console.log('fast carb absorption rate:', fast_carbrate);
-        }
+// Export the function so you can use it elsewhere
+module.exports = {
+  carbAbsorption,
+  simulate,
+};
 
-        if (t < (slow_carbAbsTime/2)) {
-            var AT2 = Math.pow(slow_carbAbsTime,2);
-            var slow_carbrate = (slow_carbs * 4 * t)/AT2;
-            var COB = (slow_carbs*2*Math.pow(t,2))/AT2;
-        } 
-        else if (t < (slow_carbAbsTime)) {
-            var slow_carbrate = (slow_carbs * 4 / slow_carbAbsTime)*(1 -(t/slow_carbAbsTime));
-            var AAA = (4*slow_carbs/slow_carbAbsTime);
-            var BBB = Math.pow(t,2)/(2*slow_carbAbsTime);
-            var COB = (AAA * (t-BBB)) - slow_carbs;
-        } else {
-            var slow_carbrate = 0;
-            var COB = 0;
-            console.log('slow carb absorption rate:', slow_carbrate);
-        }
-
-    return { ...entry, 
-            time: t, 
-            fast_carbrate: fast_carbrate,
-            slow_carbrate: slow_carbrate,
-            all_carbrate: fast_carbrate + slow_carbrate
-         };
- });
-console.log(timeSinceMealAct);
-
-
-var totalCarbRate = timeSinceMealAct.reduce(function(tot, arr) { 
-    return tot + arr.all_carbrate;
-  },0);
-
-  console.log(totalCarbRate);
-
-let carbrateString = JSON.stringify(totalCarbRate);
-const fs = require('fs');
-fs.writeFile("./files/latest_carbs.json", carbrateString, function(err, result) {
-if(err) console.log('error', err);
-});
+// To test it manually, uncomment:
+// simulate(50);
