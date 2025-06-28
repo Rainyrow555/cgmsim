@@ -1,54 +1,34 @@
-// files/carbs.js
+const dotenv = require('dotenv');
+dotenv.config();
 
-/**
- * Carb absorption model — simulates how carbs enter the bloodstream
- * over 180 minutes using a Gaussian distribution (peaks at 60 min).
- */
+const fs = require('fs');
+const path = require('path');
 
-const TOTAL_ABSORPTION_MINUTES = 180;
+// Load ISF and CR from environment variables
+const ISF = parseFloat(process.env.ISF); // e.g., 50 mg/dL per unit
+const CR = parseFloat(process.env.CR);   // e.g., 10g carbs per unit
+console.log('ISF:', ISF, 'CR:', CR);
 
-function gaussian(x, mean, sigma) {
-  return Math.exp(-0.5 * Math.pow((x - mean) / sigma, 2));
-}
+// Load sinusoidal curve data from JSON
+const sinusDataPath = path.join(__dirname, 'files', 'sinuscurves.json');
+const sinusData = JSON.parse(fs.readFileSync(sinusDataPath, 'utf-8'));
+const sinus = sinusData.sinus;
+const cosinus = sinusData.cosinus;
 
-/**
- * Returns carbs absorbed at a specific minute since the meal started.
- * @param {number} totalCarbs - Total grams of carbs eaten
- * @param {number} minutesSinceMeal - Minutes passed since the meal began
- * @returns {number} - grams of carbs absorbed at that minute
- */
-function carbAbsorption(totalCarbs, minutesSinceMeal) {
-  if (minutesSinceMeal < 0 || minutesSinceMeal > TOTAL_ABSORPTION_MINUTES) {
-    return 0;
-  }
+console.log('sinus:', sinus);
+console.log('cosinus:', cosinus);
 
-  const peakTime = 60;
-  const stdDev = 30;
+// Calculate constant liver glucose contribution (in mg/dL every 5 min)
+// Liver produces ~10g carbs/hour → divide by 12 (5 min chunks) = ~0.833g every 5 min
+// Convert carbs to BG using ISF/CR (BG rise per gram of carbs)
+const liver = (ISF / CR) * (10 / 12);  // base BGI value every 5 minutes
+const liver_sin = sinus.map(val => +(val * liver).toFixed(2)); // modulate with sinus curve
 
-  // Normalize the curve
-  let normalization = 0;
-  for (let t = 0; t <= TOTAL_ABSORPTION_MINUTES; t++) {
-    normalization += gaussian(t, peakTime, stdDev);
-  }
+console.log('Base liver BGI per 5min:', liver.toFixed(2));
+console.log('Sinus-modulated liver BGI:', liver_sin);
 
-  const proportion = gaussian(minutesSinceMeal, peakTime, stdDev) / normalization;
-  return totalCarbs * proportion;
-}
+// Save result to ./files/latest_liver.json
+const outputPath = path.join(__dirname, 'files', 'latest_liver.json');
+fs.writeFileSync(outputPath, JSON.stringify(liver_sin, null, 4));
 
-// ⏱️ Optional: run a test simulation
-function simulate(totalCarbs) {
-  console.log(`\n📊 Absorption curve for ${totalCarbs}g carbs\n`);
-  for (let t = 0; t <= TOTAL_ABSORPTION_MINUTES; t += 10) {
-    const absorbed = carbAbsorption(totalCarbs, t);
-    console.log(`Minute ${t}: ${absorbed.toFixed(2)}g`);
-  }
-}
-
-// Export the function so you can use it elsewhere
-module.exports = {
-  carbAbsorption,
-  simulate,
-};
-
-// To test it manually, uncomment:
-// simulate(50);
+console.log('✅ Liver BGI (sinus-modulated) saved to', outputPath);
