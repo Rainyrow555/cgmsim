@@ -1,76 +1,55 @@
 const fs = require('fs');
-const mydata = require('./mydata.json');
+const path = require('path');
 const moment = require('moment');
-const dotenv = require('dotenv');
-var result = require('dotenv').config();
-const fetch = require('node-fetch');
-const api_url = process.env.API_URL;
 
-//let's hash the APISECRET
-const {
-    createHash,
-  } = require('crypto');
-const { parseInt } = require('lodash');
-  const hash = createHash('sha1');
-  hash.update(process.env.APISECRET);
-  //console.log(hash.digest('hex'));
-  const hash_secret = hash.digest('hex');
-  //console.log('this is the hashed secret:', hash_secret);
+// Load SGV starting point
+const sgvData = JSON.parse(fs.readFileSync(path.join(__dirname, 'files', 'sgv_start.json'), 'utf-8'));
+let bg = sgvData.start; // in mg/dL
 
-console.log('----------------------------------');
+// Load exercise & step data
+const exercise = JSON.parse(fs.readFileSync(path.join(__dirname, 'files', 'exercise.json'), 'utf-8'));
+const steps = JSON.parse(fs.readFileSync(path.join(__dirname, 'files', 'steps.json'), 'utf-8'));
 
-// now let's read mydata.json and the first object in the array (heart rates)
-//===========================================================================
-const heartRate_x = mydata.data.metrics[0].data;
+// Constants
+const baseISF = 50; // base insulin sensitivity factor (mg/dL per U)
+let activeISF = baseISF;
+const hourlyCarbImpact = 10; // g/hr from liver
+const CR = 10; // carbs covered by 1U
 
-const heartRate = heartRate_x.map(entry => ({
-  notes: Math.round(entry.Avg), 
-  glucose : Math.round(entry.Avg)/10, 
-  created_at: Date.parse(entry.date).valueOf(), 
-  dateString : moment(entry.date).toISOString(), 
-  eventType : "Note", 
-  secret: hash_secret, 
-  enteredBy: 'apple' }));
+// Time now
+const now = Date.now();
+const hour = moment(now).hour();
 
-console.log('heart rates:',heartRate);
-console.log('----------------------------------');
+// Detect if recent exercise or high steps (within 1 hour)
+let recentExercise = exercise.some(act => now - act.time < 60 * 60 * 1000);
+let recentSteps = steps.some(s => s.steps > 500 && now - s.time < 60 * 60 * 1000);
+let sleeping = hour >= 0 && hour < 6;
 
-// now let's read mydata.json and the second object in the array (steps)
-//======================================================================
-const steps_x = mydata.data.metrics[1].data;
+// Adjust ISF
+if (recentExercise || recentSteps) {
+    activeISF *= 1.3; // more sensitive to insulin
+} else if (sleeping) {
+    activeISF *= 0.8; // less sensitive
+}
 
-const steps = steps_x.map(entry => ({
-  qty: Math.round(entry.qty), 
-  time: Date.parse(entry.date).valueOf(), 
-  dateString : moment(entry.date).toISOString() }));
+console.log(`BG start: ${bg} mg/dL`);
+console.log(`Mode: ${recentExercise ? 'Exercise' : sleeping ? 'Sleep' : 'Normal'}`);
 
-console.log('steps:',steps);
-console.log('----------------------------------');
+// Simulate liver glucose over next hour (12 intervals of 5 min)
+let glucoseCurve = [];
+for (let i = 0; i < 12; i++) {
+    let carbs = hourlyCarbImpact / 12; // about 0.83g carbs every 5min
+    let bgRise = (activeISF / CR) * carbs;
+    bg += bgRise;
+    glucoseCurve.push(Math.round(bg));
+}
 
-// let's extract only the latest events from the arrays
-//=====================================================
-const HR_0 = heartRate[heartRate.length - 1];
-const steps_0 = steps[steps.length -1];
-console.log('HR_0:',HR_0);
-console.log('steps_0:',steps_0);
+console.log('Simulated BG (1 hour):', glucoseCurve);
 
+// Write updated curve to file
+fs.writeFileSync(
+    path.join(__dirname, 'files', 'simulated_bg_curve.json'),
+    JSON.stringify(glucoseCurve, null, 4)
+);
 
-// now let's upload the latest HR value
-//====================================
-fetch(api_url, {
-    method: 'POST',
-    headers: {
-        'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(HR_0),
-});
-
-// now let's upload the latest HR value since last sync, with backfill
-//===================================================================
-//fetch(api_url, {
-//   method: 'POST',
-//  headers: {
-//      'Content-Type': 'application/json',
-//  },
-//  body: JSON.stringify(heartRate),
-//});
+console.log('✅ Simulated BG curve saved to ./files/simulated_bg_curve.json');
